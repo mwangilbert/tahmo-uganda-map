@@ -174,4 +174,114 @@ country_tickets = tickets_df[tickets_df[ticket_country_col] == selected_country]
 # 2. Ticket Status Filter Block
 st.sidebar.subheader("📋 Ticket Workflow State")
 if ticket_status_col in country_tickets.columns:
-    unique_statuses = sorted(country_tickets[ticket_status_col].dropna().
+    unique_statuses = sorted(country_tickets[ticket_status_col].dropna().unique().tolist())
+    # Smart Defaults: Auto-check Open & Scheduled options if present
+    default_selections = [s for s in unique_statuses if any(keyword in str(s).upper() for keyword in ["OPEN", "SCHEDULE", "VISIT", "ACTIVE"])]
+    if not default_selections:
+        default_selections = unique_statuses
+        
+    selected_statuses = st.sidebar.multiselect(
+        "Show Status Types:", 
+        options=unique_statuses, 
+        default=default_selections
+    )
+    filtered_tickets = country_tickets[country_tickets[ticket_status_col].isin(selected_statuses)]
+else:
+    filtered_tickets = country_tickets.copy()
+
+ticket_lookup = filtered_tickets.set_index(ticket_station_col)
+
+# 3. Category Filter
+st.sidebar.subheader("⚠️ Filter Categories")
+all_categories = sorted(filtered_tickets[ticket_category_col].dropna().unique().tolist())
+selected_categories = st.sidebar.multiselect("Active Maintenance Types:", options=all_categories, default=all_categories)
+final_filtered_tickets = filtered_tickets[filtered_tickets[ticket_category_col].isin(selected_categories)]
+final_ticket_lookup = final_filtered_tickets.set_index(ticket_station_col)
+
+# 4. KMZ Toggle
+st.sidebar.subheader("🗺️ KMZ Overlay Settings")
+show_route = st.sidebar.checkbox("Overlay Google Maps Route", value=True)
+
+# --- App Presentation UI ---
+st.markdown(f'<div class="main-title">🌐 {selected_country} Operations Portal</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Live Diagnostics Management and Filter-Isolated Infrastructure Explorer</div>', unsafe_allow_html=True)
+
+# Calculate Counts dynamically based on active filters
+total_stations = len(country_stations)
+active_incidents_count = len(final_filtered_tickets)
+
+c1, c2 = st.columns(2)
+with c1:
+    st.markdown(f'<div class="metric-card"><div class="metric-label">Total Mapped Stations ({selected_country})</div>'
+                f'<div class="metric-value" style="color: #0F172A;">{total_stations}</div></div>', unsafe_allow_html=True)
+with c2:
+    st.markdown(f'<div class="metric-card"><div class="metric-label">Filtered Operational Log Alerts</div>'
+                f'<div class="metric-value" style="color: #D97706;">{active_incidents_count}</div></div>', unsafe_allow_html=True)
+
+# Build Map Layout Canvas
+if not country_stations.empty and country_stations[lat_col].notna().any():
+    map_center = [country_stations[lat_col].median(), country_stations[lon_col].median()]
+    zoom_val = 7.0
+else:
+    map_center = [1.3733, 32.2903]
+    zoom_val = 7
+
+m = folium.Map(location=map_center, zoom_start=zoom_val, tiles="CartoDB Positron")
+
+layer_all_stations = folium.FeatureGroup(name="All System Stations")
+layer_active_tickets = folium.FeatureGroup(name="⚠️ Filtered Maintenance Alerts")
+layer_google_route = folium.FeatureGroup(name="🗺️ Google Maps KMZ Route Path")
+
+def clean_txt(val):
+    if pd.isna(val): return ""
+    return str(val).strip().replace("'", "&#39;").replace('"', "&quot;")
+
+# Run Map Placement Iterations
+for _, row in country_stations.iterrows():
+    s_id = row[station_id_col]
+    s_name = row[station_name_col]
+    lat, lon = row[lat_col], row[lon_col]
+    if pd.isna(lat) or pd.isna(lon): continue
+
+    # Draw regular station nodes
+    p_html = f"<b>Station:</b> {clean_txt(s_name)}<br><b>ID:</b> <code>{clean_txt(s_id)}</code>"
+    folium.CircleMarker([lat, lon], radius=5, color="#94A3B8", weight=1.5, fill=True, fill_color="#CBD5E1", 
+                        popup=folium.Popup(p_html, max_width=250)).add_to(layer_all_stations)
+
+    # If station matches a filtered maintenance alert
+    if s_id in final_ticket_lookup.index:
+        t_data = final_ticket_lookup.loc[s_id]
+        t_row = t_data.iloc[0] if isinstance(t_data, pd.DataFrame) else t_data
+        
+        status_val = str(t_row[ticket_status_col]) if ticket_status_col in t_row.index else "Open"
+        cat_val = str(t_row[ticket_category_col])
+        
+        # Color Code markers based on Open Ticket vs Scheduled Visit
+        marker_color = "red" if "OPEN" in status_val.upper() else "orange"
+        icon_type = "exclamation-triangle" if "OPEN" in status_val.upper() else "calendar-check"
+        
+        popup_msg = f"<b>🚨 Alert Type:</b> {clean_txt(cat_val)}<br><b>Workflow Status:</b> {clean_txt(status_val)}"
+        
+        folium.Marker([lat, lon], 
+                      icon=folium.Icon(color=marker_color, icon=icon_type, prefix="fa"),
+                      popup=folium.Popup(popup_msg, max_width=300)).add_to(layer_active_tickets)
+
+# Overlay KMZ path traces if turned on
+if show_route and route_lines:
+    for line in route_lines:
+        folium.PolyLine(line, color="#2563EB", weight=5, opacity=0.8).add_to(layer_google_route)
+
+layer_all_stations.add_to(m)
+layer_active_tickets.add_to(m)
+if show_route:
+    layer_google_route.add_to(m)
+
+folium.LayerControl(collapsed=False).add_to(m)
+st_folium(m, use_container_width=True, height=550)
+
+# Render Data Table Grid of only the targets matching filters
+st.markdown("### 📋 Filtered Operational Task Directory")
+if not final_filtered_tickets.empty:
+    st.dataframe(final_filtered_tickets, use_container_width=True, hide_index=True)
+else:
+    st.success("No active logs match the current filter matrix selection.")
